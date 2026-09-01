@@ -30,9 +30,9 @@ jobs:
           export SOONG_GEN_COMPDB=0
           export NINJA_ARGS="-j2"
           export _JAVA_OPTIONS="-Xmx2048m"
-          cd /
-          rm -rf /lineage
-          mkdir -p /lineage && cd /lineage
+cd ~
+rm -rf ~/lineage
+mkdir -p ~/lineage && cd ~/lineage
           repo init -u https://github.com/LineageOS/android.git -b lineage-18.1 --no-clone-bundle --git-lfs
           mkdir -p .repo/local_manifests
           cat << 'EOF' > .repo/local_manifests/roomservice.xml
@@ -48,7 +48,7 @@ jobs:
 
       - name: Apply USB VID Whitelist Patch
         run: |
-          cd /lineage
+          cd ~/lineage
           export GOGC=20
           export SOONG_GEN_COMPDB=0
           export _JAVA_OPTIONS="-Xmx2048m"
@@ -104,7 +104,7 @@ jobs:
 
       - name: Clean .repo & Build ROM
         run: |
-          cd /lineage
+          cd ~/lineage
           export GOGC=20
           export SOONG_GEN_COMPDB=0
           export NINJA_ARGS="-j2"
@@ -118,4 +118,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: LineageOS-18.1-star2qltechn-ROM
-          path: /lineage/out/target/product/star2qltechn/lineage-18.1-*.zip
+          path: ~/lineage/out/target/product/star2qltechn/lineage-18.1-*.zip
