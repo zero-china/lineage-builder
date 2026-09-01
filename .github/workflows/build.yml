@@ -1,0 +1,101 @@
+name: Build LineageOS 18.1 for Samsung S9+ (star2qltechn)
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Maximize Disk Space & Enable 16G Swap
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 2048
+          swap-size-mb: 16384
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
+      - name: Install Build Tools & Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y git-lfs bc bisect-pp flex bison build-essential curl libgl1-mesa-dev libxml2-utils xsltproc zip zlib1g-dev python3
+          git lfs install
+          sudo curl https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
+          sudo chmod a+rx /usr/local/bin/repo
+
+      - name: Initialize Repo & Manifests
+        run: |
+          mkdir -p ~/lineage && cd ~/lineage
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          repo init -u https://github.com/LineageOS/android.git -b lineage-18.1 --no-clone-bundle --git-lfs
+          mkdir -p .repo/local_manifests
+          cat << 'EOF' > .repo/local_manifests/roomservice.xml
+          <?xml version="1.0" encoding="UTF-8"?>
+          <manifest>
+            <project name="matebuteler/android_device_samsung_star2qltechn" path="device/samsung/star2qltechn" remote="github" revision="lineage-18.1" />
+            <project name="matebuteler/android_device_samsung_sdm845-common" path="device/samsung/sdm845-common" remote="github" revision="lineage-18.1" />
+            <project name="klabit87/android_kernel_samsung_sdm845" path="kernel/samsung/sdm845" remote="github" revision="lineage-18.0" />
+            <project name="DotOS-Devices/proprietary_vendor_samsung_sdm845-common" path="vendor/samsung/sdm845-common" remote="github" revision="dot11" />
+          </manifest>
+          EOF
+          repo sync -c --no-tags --no-clone-bundle --optimized-fetch -j8 --force-sync
+
+      - name: Apply USB VID Whitelist Patch
+        run: |
+          cd ~/lineage
+          python3 -c '
+          path = "frameworks/base/services/usb/java/com/android/server/usb/UsbHostManager.java"
+          with open(path, "r") as f:
+              content = f.read()
+          old_code = """    public void getDeviceList(Bundle devices) {
+              synchronized (mLock) {
+                  for (String name : mDevices.keySet()) {
+                      devices.putParcelable(name, mDevices.get(name));
+                  }
+              }
+          }"""
+          new_code = """    public void getDeviceList(Bundle devices) {
+              synchronized (mLock) {
+                  int callingUid = Binder.getCallingUid();
+                  String[] packages = mContext.getPackageManager().getPackagesForUid(callingUid);
+                  boolean isWhitelisted = false;
+                  if (packages != null) {
+                      for (String pkg : packages) {
+                          if ("com.junkfood.seal".equals(pkg) || "com.zerodogs.min".equals(pkg)) {
+                              isWhitelisted = true;
+                              break;
+                          }
+                      }
+                  }
+                  for (String name : mDevices.keySet()) {
+                      UsbDevice device = mDevices.get(name);
+                      if (device != null && device.getVendorId() == 0x0000 && !isWhitelisted) {
+                          continue;
+                      }
+                      devices.putParcelable(name, device);
+                  }
+              }
+          }"""
+          if old_code in content:
+              content = content.replace(old_code, new_code)
+              with open(path, "w") as f:
+                  f.write(content)
+              print("✅ 白名单代码补丁成功打入！")
+          '
+
+      - name: Clean .repo & Build ROM
+        run: |
+          cd ~/lineage
+          rm -rf .repo
+          export NINJA_ARGS="-j4"
+          source build/envsetup.sh
+          lunch lineage_star2qltechn-userdebug
+          mka bacon
+
+      - name: Upload ROM Zip File
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineageOS-18.1-star2qltechn-ROM
+          path: ~/lineage/out/target/product/star2qltechn/lineage-18.1-*.zip
