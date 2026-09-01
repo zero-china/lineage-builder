@@ -19,16 +19,20 @@ jobs:
       - name: Install Build Tools & Dependencies
         run: |
           sudo apt update
-          sudo apt install -y git-lfs bc bisect flex bison build-essential curl libgl1-mesa-dev libxml2-utils xsltproc zip zlib1g-dev python3
+          sudo apt install -y git-lfs flex bison build-essential curl libgl1-mesa-dev libxml2-utils xsltproc zip zlib1g-dev python3
           git lfs install
-          sudo curl https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
-          sudo chmod a+rx /usr/local/bin/repo
+          curl https://storage.googleapis.com/git-repo-downloads/repo > /usr/local/bin/repo
+          chmod a+rx /usr/local/bin/repo
 
       - name: Initialize Repo & Manifests
         run: |
-          mkdir -p ~/lineage && cd ~/lineage
-          git config --global user.name "github-actions"
-          git config --global user.email "github-actions@github.com"
+          export GOGC=20
+          export SOONG_GEN_COMPDB=0
+          export NINJA_ARGS="-j2"
+          export _JAVA_OPTIONS="-Xmx2048m"
+          cd /
+          rm -rf /lineage
+          mkdir -p /lineage && cd /lineage
           repo init -u https://github.com/LineageOS/android.git -b lineage-18.1 --no-clone-bundle --git-lfs
           mkdir -p .repo/local_manifests
           cat << 'EOF' > .repo/local_manifests/roomservice.xml
@@ -44,8 +48,12 @@ jobs:
 
       - name: Apply USB VID Whitelist Patch
         run: |
-          cd ~/lineage
+          cd /lineage
+          export GOGC=20
+          export SOONG_GEN_COMPDB=0
+          export _JAVA_OPTIONS="-Xmx2048m"
           python3 -c '
+          import re
           path = "frameworks/base/services/usb/java/com/android/server/usb/UsbHostManager.java"
           with open(path, "r") as f:
               content = f.read()
@@ -60,6 +68,7 @@ jobs:
               synchronized (mLock) {
                   int callingUid = Binder.getCallingUid();
                   String[] packages = mContext.getPackageManager().getPackagesForUid(callingUid);
+
                   boolean isWhitelisted = false;
                   if (packages != null) {
                       for (String pkg : packages) {
@@ -69,6 +78,7 @@ jobs:
                           }
                       }
                   }
+
                   for (String name : mDevices.keySet()) {
                       UsbDevice device = mDevices.get(name);
                       if (device != null && device.getVendorId() == 0x0000 && !isWhitelisted) {
@@ -82,20 +92,30 @@ jobs:
               content = content.replace(old_code, new_code)
               with open(path, "w") as f:
                   f.write(content)
-              print("✅ 白名单代码补丁成功打入！")
+              print("✅ 白名单代码补丁成功应用！")
+          elif re.search(r"public void getDeviceList\(Bundle devices\) \{[\s\S]*?\}\n    \}", content):
+              content = re.sub(r"public void getDeviceList\(Bundle devices\) \{[\s\S]*?\}\n    \}", new_code.strip(), content)
+              with open(path, "w") as f:
+                  f.write(content)
+              print("✅ 正则匹配成功，白名单补丁已打入！")
+          else:
+              print("⚠️ 未匹配到方法")
           '
 
       - name: Clean .repo & Build ROM
         run: |
-          cd ~/lineage
+          cd /lineage
+          export GOGC=20
+          export SOONG_GEN_COMPDB=0
+          export NINJA_ARGS="-j2"
+          export _JAVA_OPTIONS="-Xmx2048m"
           rm -rf .repo
-          export NINJA_ARGS="-j4"
           source build/envsetup.sh
           lunch lineage_star2qltechn-userdebug
-          mka bacon
+          brunch star2qltechn
 
       - name: Upload ROM Zip File
         uses: actions/upload-artifact@v4
         with:
           name: LineageOS-18.1-star2qltechn-ROM
-          path: ~/lineage/out/target/product/star2qltechn/lineage-18.1-*.zip
+          path: /lineage/out/target/product/star2qltechn/lineage-18.1-*.zip
