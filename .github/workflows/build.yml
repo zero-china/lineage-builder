@@ -35,9 +35,6 @@ jobs:
           sudo curl https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
           sudo chmod a+rx /usr/local/bin/repo
 
-      # =========================================================
-      # 开启 GitHub 10GB 免费跨运行缓存 (断点记忆/续传机制)
-      # =========================================================
       - name: Setup 10GB Ccache (Cross-Run Cache)
         uses: actions/cache@v4
         with:
@@ -49,7 +46,6 @@ jobs:
       - name: Initialize Repo & Manifests
         run: |
           mkdir -p ~/lineage && cd ~/lineage
-          # -g default,-darwin 屏蔽 Mac 平台 20GB+ 垃圾工具链，--depth=1 浅克隆
           repo init -u https://github.com/LineageOS/android.git -b lineage-18.1 --no-clone-bundle --git-lfs --depth=1 -g default,-darwin
           mkdir -p .repo/local_manifests
           cat << 'EOF' > .repo/local_manifests/roomservice.xml
@@ -64,6 +60,9 @@ jobs:
 
             <!-- Vendor Blobs -->
             <project name="DotOS-Devices/proprietary_vendor_samsung_sdm845-common" path="vendor/samsung/sdm845-common" remote="github" revision="dot11" />
+
+            <!-- Hardware Samsung (必须的三星硬件底层支持库) -->
+            <project name="LineageOS/android_hardware_samsung" path="hardware/samsung" remote="github" revision="lineage-18.1" />
           </manifest>
           EOF
           repo sync -c --no-tags --no-clone-bundle --optimized-fetch -j8 --force-sync
@@ -132,7 +131,6 @@ jobs:
           export CCACHE_EXEC=/usr/bin/ccache
           export CCACHE_DIR=~/.cache/ccache
           ccache -M 10G
-          ccache -z
           export NINJA_ARGS="-j4"
           source build/envsetup.sh
           lunch lineage_star2qltechn-userdebug
