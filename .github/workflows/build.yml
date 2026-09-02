@@ -35,9 +35,6 @@ jobs:
           sudo curl https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
           sudo chmod a+rx /usr/local/bin/repo
 
-      # =========================================================
-      # 1. 开头读取 10GB 跨运行缓存
-      # =========================================================
       - name: Restore 10GB Ccache
         uses: actions/cache/restore@v4
         with:
@@ -64,7 +61,7 @@ jobs:
             <!-- Vendor Blobs -->
             <project name="DotOS-Devices/proprietary_vendor_samsung_sdm845-common" path="vendor/samsung/sdm845-common" remote="github" revision="dot11" />
 
-            <!-- Hardware Samsung (必须的三星硬件底层支持库) -->
+            <!-- Hardware Samsung -->
             <project name="LineageOS/android_hardware_samsung" path="hardware/samsung" remote="github" revision="lineage-18.1" />
           </manifest>
           EOF
@@ -137,27 +134,22 @@ jobs:
           export NINJA_ARGS="-j4"
           source build/envsetup.sh
           lunch lineage_star2qltechn-userdebug
-          
-          # 带 1% 进度的清爽精简日志打印
           mka bacon 2>&1 | python3 -c '
-import sys, re
-last_pct = -1
-for line in sys.stdin:
-    m = re.search(r"\[\s*(\d+)%\s+(\d+)/(\d+)\]", line)
-    if m:
-        pct = int(m.group(1))
-        if pct != last_pct:
-            print(f"🚀 编译进度: {pct}% ({m.group(2)}/{m.group(3)})")
-            sys.stdout.flush()
-            last_pct = pct
-    elif "FAILED" in line or "error:" in line or "Completed" in line:
-        print(line, end="")
-        sys.stdout.flush()
-'
+          import sys, re
+          last_pct = -1
+          for line in sys.stdin:
+              m = re.search(r"\[\s*(\d+)%\s+(\d+)/(\d+)\]", line)
+              if m:
+                  pct = int(m.group(1))
+                  if pct != last_pct:
+                      print(f"🚀 编译进度: {pct}% ({m.group(2)}/{m.group(3)})")
+                      sys.stdout.flush()
+                      last_pct = pct
+              elif "FAILED" in line or "error:" in line or "Completed" in line:
+                  print(line, end="")
+                  sys.stdout.flush()
+          '
 
-      # =========================================================
-      # 2. 末尾强制保存缓存 (即使手动 Cancel 取消或报错也 100% 写入缓存)
-      # =========================================================
       - name: Save 10GB Ccache Always (Even on Cancel or Error)
         uses: actions/cache/save@v4
         if: always()
