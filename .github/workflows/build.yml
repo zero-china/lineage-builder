@@ -6,7 +6,14 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    # Job 总超时设为 350 分钟（5小时50分），留出足够缓冲给后续缓存上传
+    timeout-minutes: 350
+
     steps:
+      - name: Generate Timestamp
+        id: timestamp
+        run: echo "ts=$(date +%s)" >> $GITHUB_OUTPUT
+
       - name: Deep Cleanup Disk Space & Setup 16G Swap
         run: |
           sudo swapoff -a 2>/dev/null || true
@@ -35,13 +42,16 @@ jobs:
           sudo curl https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
           sudo chmod a+rx /usr/local/bin/repo
 
-      - name: Restore 10GB Ccache
+      # ==========================================
+      # 1. 恢复缓存：自动匹配最新保存的一份 ccache
+      # ==========================================
+      - name: Restore Ccache
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/ccache
-          key: ccache-${{ runner.os }}-${{ github.run_id }}
+          key: ccache-${{ runner.os }}-lineage18-${{ steps.timestamp.outputs.ts }}
           restore-keys: |
-            ccache-${{ runner.os }}-
+            ccache-${{ runner.os }}-lineage18-
 
       - name: Initialize Repo & Manifests
         run: |
@@ -123,7 +133,13 @@ jobs:
               print("⚠️ 未匹配到方法")
           '
 
+      # ==========================================
+      # 2. 编译步骤：限制此步最多运行 5 个小时 (300 分钟)
+      # 如果 5 小时没编完，会自动跳出并进入下一步保存已编译好的 Ccache
+      # ==========================================
       - name: Clean .repo & Build ROM with Ccache
+        id: build_rom
+        timeout-minutes: 300
         run: |
           cd ~/lineage
           rm -rf .repo
@@ -132,6 +148,8 @@ jobs:
           export CCACHE_DIR=~/.cache/ccache
           ccache -M 10G
           export NINJA_ARGS="-j4"
+          # 锁定编译时间戳为官方 LineageOS 18.1 历史发布时间 (2022-10-18 00:00:00 UTC)
+          export SOURCE_DATE_EPOCH=1666051200
           source build/envsetup.sh
           lunch lineage_star2qltechn-userdebug
           mka bacon 2>&1 | python3 -c '
@@ -150,14 +168,25 @@ jobs:
                   sys.stdout.flush()
           '
 
-      - name: Save 10GB Ccache Always (Even on Cancel or Error)
-        uses: actions/cache/save@v4
+      # ==========================================
+      # 3. 强制保存缓存：
+      # 无论成功、失败、单步 5 小时超时、或者手动 Cancel，都会执行！
+      # ==========================================
+      - name: Save Ccache (Always on Success, Failure, Timeout, or Cancel)
         if: always()
+        uses: actions/cache/save@v4
         with:
           path: ~/.cache/ccache
-          key: ccache-${{ runner.os }}-${{ github.run_id }}
+          key: ccache-${{ runner.os }}-lineage18-${{ steps.timestamp.outputs.ts }}
+
+      - name: Show Ccache Stats
+        if: always()
+        run: |
+          export CCACHE_DIR=~/.cache/ccache
+          ccache -s || true
 
       - name: Upload ROM Zip File
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: LineageOS-18.1-star2qltechn-ROM
