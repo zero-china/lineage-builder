@@ -35,6 +35,9 @@ jobs:
           sudo curl https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
           sudo chmod a+rx /usr/local/bin/repo
 
+      # =========================================================
+      # 1. 开头读取 10GB 跨运行缓存
+      # =========================================================
       - name: Restore 10GB Ccache
         uses: actions/cache/restore@v4
         with:
@@ -61,7 +64,7 @@ jobs:
             <!-- Vendor Blobs -->
             <project name="DotOS-Devices/proprietary_vendor_samsung_sdm845-common" path="vendor/samsung/sdm845-common" remote="github" revision="dot11" />
 
-            <!-- Hardware Samsung -->
+            <!-- Hardware Samsung (必须的三星硬件底层支持库) -->
             <project name="LineageOS/android_hardware_samsung" path="hardware/samsung" remote="github" revision="lineage-18.1" />
           </manifest>
           EOF
@@ -131,7 +134,7 @@ jobs:
           export CCACHE_EXEC=/usr/bin/ccache
           export CCACHE_DIR=~/.cache/ccache
           ccache -M 10G
-          export NINJA_ARGS="-j2"
+          export NINJA_ARGS="-j4"
           source build/envsetup.sh
           lunch lineage_star2qltechn-userdebug
           
@@ -152,6 +155,9 @@ for line in sys.stdin:
         sys.stdout.flush()
 '
 
+      # =========================================================
+      # 2. 末尾强制保存缓存 (即使手动 Cancel 取消或报错也 100% 写入缓存)
+      # =========================================================
       - name: Save 10GB Ccache Always (Even on Cancel or Error)
         uses: actions/cache/save@v4
         if: always()
