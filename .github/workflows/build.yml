@@ -131,7 +131,7 @@ jobs:
           export CCACHE_EXEC=/usr/bin/ccache
           export CCACHE_DIR=~/.cache/ccache
           ccache -M 10G
-          export NINJA_ARGS="-j4"
+          export NINJA_ARGS="-j2"
           source build/envsetup.sh
           lunch lineage_star2qltechn-userdebug
           mka bacon
