@@ -67,19 +67,17 @@ jobs:
             ccache-${{ runner.os }}-lineage18-
 
       # ==========================================
-      # 2. 核心补丁：智能检测并纠偏 Ccache 真实路径（确保 100% 吃到 4GB 缓存）
+      # 2. 缓存路径纠偏（确保 100% 将缓存归位至 /home/runner/.cache/ccache）
       # ==========================================
       - name: Align and Verify Ccache Directory
         run: |
           mkdir -p /home/runner/.cache/ccache
 
-          # 检查 GitHub 是否解压到了工作区目录中
           if [ -d "$GITHUB_WORKSPACE/.cache/ccache" ]; then
             echo "🔧 检测到缓存解压在工作区相对路径，正在迁移至 /home/runner/.cache/ccache..."
             cp -rn $GITHUB_WORKSPACE/.cache/ccache/* /home/runner/.cache/ccache/ 2>/dev/null || true
           fi
 
-          # 检查当前运行目录下是否有 ccache 目录
           if [ -d "$PWD/.cache/ccache" ] && [ "$PWD" != "/home/runner" ]; then
             echo "🔧 检测到当前目录缓存，正在合并..."
             cp -rn $PWD/.cache/ccache/* /home/runner/.cache/ccache/ 2>/dev/null || true
@@ -170,7 +168,7 @@ jobs:
           '
 
       # ==========================================
-      # 3. 智能接力编译 + 动态空间瘦身守护进程
+      # 3. 智能接力编译 + AOSP 极致高命中率环境 + 动态空间瘦身
       # ==========================================
       - name: Clean .repo & Build ROM with Ccache
         id: build_rom
@@ -183,12 +181,21 @@ jobs:
           echo "=== 删掉 .repo 后的磁盘空间 ==="
           df -h
 
+          # ==========================================
+          # 🚀 Ccache AOSP 专属高命中率环境变量（关键加速配置）
+          # ==========================================
           export USE_CCACHE=1
           export CCACHE_EXEC=/usr/bin/ccache
           export CCACHE_DIR=/home/runner/.cache/ccache
+          export CCACHE_BASEDIR=/home/runner/lineage
+          export CCACHE_NOHASHDIR=1
+          export CCACHE_COMPILERCHECK=content
+          export CCACHE_SLOPPINESS=include_file_ctime,include_file_mtime,time_macros,file_macro
           ccache -M 8G
           export NINJA_ARGS="-j4"
           export SOURCE_DATE_EPOCH=1666051200
+
+          # 必须在上述环境变量设置完毕后再 source
           source build/envsetup.sh
           lunch lineage_star2qltechn-userdebug
 
