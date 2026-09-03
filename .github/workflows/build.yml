@@ -24,7 +24,7 @@ jobs:
 
       - name: Deep Cleanup Disk Space & Setup 16G Swap
         run: |
-          sudo swapoff a 2>/dev/null || true
+          sudo swapoff -a 2>/dev/null || true
           sudo rm -f /swapfile 2>/dev/null || true
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
