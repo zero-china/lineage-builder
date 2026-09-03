@@ -55,7 +55,7 @@ jobs:
           sudo chmod a+rx /usr/local/bin/repo
 
       # ==========================================
-      # 1. 恢复 Ccache（纯绝对路径，杜绝任何歧义）
+      # 1. 恢复 Ccache（纯绝对路径，精准命中 4.97GB）
       # ==========================================
       - name: Restore Ccache
         uses: actions/cache/restore@v4
@@ -217,7 +217,7 @@ jobs:
           '
 
       # ==========================================
-      # 3. 智能接力编译 + AOSP 极致高命中率环境 + 安全空间瘦身
+      # 3. 智能接力编译 + 激进主动空间水位防御守护进程
       # ==========================================
       - name: Clean .repo & Build ROM with Ccache
         id: build_rom
@@ -230,7 +230,7 @@ jobs:
           echo "=== 删掉 .repo 后的磁盘空间 ==="
           df -h
 
-          # Ccache 专属优化
+          # Ccache 极致命中率配置
           export USE_CCACHE=1
           export CCACHE_EXEC=/usr/bin/ccache
           export CCACHE_DIR=/home/runner/.cache/ccache
@@ -245,35 +245,52 @@ jobs:
           source build/envsetup.sh
           lunch lineage_star2qltechn-userdebug
 
-          # 🧹 安全空间守护进程：只清理中间临时 .o 和 symbols，绝不误删系统源码
+          # 🧹 激进主动水位守护进程：只要可用空间 < 25GB，立即自动大扫除！
           cat << 'PYEOF' > /tmp/disk_cleaner.py
-          import os, time, shutil
+          import os, time, shutil, subprocess
 
           OUT_DIR = "/home/runner/lineage/out/target/product/star2qltechn"
           KERNEL_OBJ = os.path.join(OUT_DIR, "obj/KERNEL_OBJ")
           SYMBOLS_DIR = os.path.join(OUT_DIR, "symbols")
-          cleaned_kernel = False
 
           while True:
-              time.sleep(20)
+              time.sleep(15)
               try:
-                  if not cleaned_kernel and os.path.exists(KERNEL_OBJ):
-                      boot_img = os.path.join(OUT_DIR, "boot.img")
-                      kernel_bin = os.path.join(KERNEL_OBJ, "arch/arm64/boot/Image.gz-dtb")
-                      if os.path.exists(boot_img) or os.path.exists(kernel_bin):
-                          for root, dirs, files in os.walk(KERNEL_OBJ):
-                              for f in files:
-                                  if f.endswith(('.o', '.o.cmd', '.o.d', '.a')) and not f.startswith('Image'):
-                                      try: os.remove(os.path.join(root, f))
-                                      except: pass
-                          cleaned_kernel = True
+                  # 获取根目录剩余空间(GB)
+                  st = os.statvfs("/")
+                  avail_gb = (st.f_bavail * st.f_frsize) / (1024 * 1024 * 1024)
+
+                  # 持续清空无用的调试符号
                   if os.path.exists(SYMBOLS_DIR):
                       for item in os.listdir(SYMBOLS_DIR):
-                          item_path = os.path.join(SYMBOLS_DIR, item)
+                          p = os.path.join(SYMBOLS_DIR, item)
                           try:
-                              if os.path.isdir(item_path): shutil.rmtree(item_path, ignore_errors=True)
-                              else: os.remove(item_path)
+                              if os.path.isdir(p): shutil.rmtree(p, ignore_errors=True)
+                              else: os.remove(p)
                           except: pass
+
+                  # 水位预警：只要剩余空间低于 25GB，立即启动强力大扫除
+                  if avail_gb < 25.0:
+                      print(f"\n[DiskCleaner] ⚠️ 磁盘剩余空间仅剩 {avail_gb:.1f}GB，触发主动空间回收...", flush=True)
+
+                      # 1. 深度清理 KERNEL_OBJ 下的所有 .cmd, .d, .o 中间缓存
+                      if os.path.exists(KERNEL_OBJ):
+                          for root, dirs, files in os.walk(KERNEL_OBJ):
+                              for f in files:
+                                  if f.endswith(('.o.cmd', '.d', '.cmd')) or (f.endswith('.o') and not f.startswith('Image')):
+                                      try: os.remove(os.path.join(root, f))
+                                      except: pass
+
+                      # 2. 清理 Soong 产生的临时日志与中间元数据
+                      soong_temp = "/home/runner/lineage/out/soong/.intermediates/frameworks"
+                      if os.path.exists(soong_temp):
+                          for root, dirs, files in os.walk(soong_temp):
+                              for f in files:
+                                  if f.endswith(('.d', '.ninja_deps')):
+                                      try: os.remove(os.path.join(root, f))
+                                      except: pass
+
+                      print("[DiskCleaner] ✅ 空间回收完成！", flush=True)
               except: pass
           PYEOF
           python3 /tmp/disk_cleaner.py &
@@ -324,7 +341,7 @@ jobs:
           kill -9 $CLEANER_PID 2>/dev/null || true
 
       # ==========================================
-      # 4. 保存 Ccache 缓存（纯绝对路径）
+      # 4. 保存 Ccache 缓存
       # ==========================================
       - name: Save Ccache (Always on Success, Failure, Timeout, or Cancel)
         if: always()
