@@ -1,7 +1,16 @@
-name: Build LineageOS 18.1 for Samsung S9+
+name: Build LineageOS 18.1 for Samsung S9+ (star2qltechn)
 
 on:
   workflow_dispatch:
+    inputs:
+      build_stage:
+        description: '请选择编译阶段'
+        required: true
+        type: choice
+        default: '第 2 次运行 (全量冲刺 100% 打包出 ROM)'
+        options:
+          - '第 1 次运行 (编到 55% 自动安全刹车并存缓存)'
+          - '第 2 次运行 (全量冲刺 100% 打包出 ROM)'
 
 jobs:
   build:
@@ -9,147 +18,235 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Generate Timestamp
+        id: timestamp
+        run: echo "ts=$(date +%s)" >> $GITHUB_OUTPUT
 
-      - name: Free up disk space & Setup Environment
+      - name: Deep Cleanup Disk Space & Setup 16G Swap
         run: |
-          echo "=== 1. 清理 Runner 无用软件包与镜像 ==="
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/local/share/chromium /usr/local/doc /opt/hostedtoolcache
-          sudo apt-get purge -y ghc* zulu* php* firefox google-chrome* azure-cli* microsoft-edge* powershell* mongodb* mysql* azure-cli* || true
-          sudo apt-get autoremove -y || true
-          sudo apt-get clean || true
-          
-          echo "=== 2. 创建 16GB 高性能 Swap (解决 OOM) ==="
-          sudo swapoff -a || true
-          sudo rm -f /swapfile || true
-          sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
+          sudo swapoff -a 2>/dev/null || true
+          sudo rm -f /swapfile 2>/dev/null || true
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /usr/local/share/powershell
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/julia*
+          sudo rm -rf /usr/local/aws*
+          sudo rm -rf /var/lib/docker
+          sudo rm -rf /var/lib/containerd
+          sudo rm -rf /usr/lib/llvm-*
+          sudo apt-get clean
+          sudo rm -rf /var/cache/apt/archives/*
+          sudo fallocate -l 16G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
-          free -h
+          echo "=== 磁盘清理后状态 ==="
+          df -h
 
-          echo "=== 3. 安装 AOSP 依赖工具链 (恢复之前验证正确的原始指令) ==="
-          sudo apt-get update
-          sudo apt-get install -y bc build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf lib32ncurses5-dev lib32z1-dev libc6-dev-i386 libncurses5 libncurses5-dev libreadline-dev libsqlite3-dev libssl-dev libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 python-is-python3 zstd || true
+      - name: Install Build Tools & Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y git-lfs flex bison build-essential curl libgl1-mesa-dev libxml2-utils xsltproc zip zlib1g-dev python3 ccache libncurses5 libtinfo5
+          git lfs install
+          sudo curl https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
+          sudo chmod a+rx /usr/local/bin/repo
 
-          echo "=== 4. 配置 Repo 工具 ==="
-          mkdir -p ~/bin
-          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
-          chmod a+x ~/bin/repo
-          echo "$HOME/bin" >> $GITHUB_PATH
-
-          echo "=== 5. 创建 Ccache 目录 ==="
-          mkdir -p /home/runner/.cache/ccache
-
-      # ----------------------------------------------------
-      # Ccache 恢复步骤 (只对 /home/runner/.cache/ccache 生效)
-      # ----------------------------------------------------
+      # ==========================================
+      # 1. 恢复 Ccache（纯绝对路径，精准命中 4.97GB）
+      # ==========================================
       - name: Restore Ccache
         uses: actions/cache/restore@v4
         with:
           path: /home/runner/.cache/ccache
-          key: ccache-Linux-lineage18-${{ github.run_id }}
+          key: ccache-${{ runner.os }}-lineage18-${{ steps.timestamp.outputs.ts }}
           restore-keys: |
-            ccache-Linux-lineage18-
+            ccache-${{ runner.os }}-lineage18-
 
-      - name: Sync LineageOS Source & Apply Custom Patches
+      - name: Verify Ccache Directory
         run: |
-          mkdir -p /home/runner/lineage
-          cd /home/runner/lineage
+          mkdir -p /home/runner/.cache/ccache
+          export CCACHE_DIR=/home/runner/.cache/ccache
+          ccache -M 8G
+          echo "=== 校验恢复后的 Ccache 状态 ==="
+          ccache -s
 
-          echo "=== 配置 Git ==="
-          git config --global user.name "Runner"
-          git config --global user.email "runner@github.com"
-
-          echo "=== Repo Init ==="
-          ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-18.1 --git-lfs --depth=1
-
-          echo "=== Sync Local Manifests ==="
+      - name: Initialize Repo & Manifests
+        run: |
+          mkdir -p /home/runner/lineage && cd /home/runner/lineage
+          repo init -u https://github.com/LineageOS/android.git -b lineage-18.1 --no-clone-bundle --git-lfs --depth=1 -g default,-darwin
           mkdir -p .repo/local_manifests
-          cat << 'EOF' > .repo/local_manifests/star2qltechn.xml
+          cat << 'EOF' > .repo/local_manifests/roomservice.xml
           <?xml version="1.0" encoding="UTF-8"?>
           <manifest>
-            <project name="LineageOS/android_device_samsung_star2qltechn" path="device/samsung/star2qltechn" remote="github" revision="lineage-18.1" />
-            <project name="LineageOS/android_device_samsung_sdm845-common" path="device/samsung/sdm845-common" remote="github" revision="lineage-18.1" />
-            <project name="LineageOS/android_kernel_samsung_sdm845" path="kernel/samsung/sdm845" remote="github" revision="lineage-18.1" />
-            <project name="The-Muppets/proprietary_vendor_samsung" path="vendor/samsung" remote="github" revision="lineage-18.1" />
+            <!-- Device Trees -->
+            <project name="matebuteler/android_device_samsung_star2qltechn" path="device/samsung/star2qltechn" remote="github" revision="lineage-18.1" />
+            <project name="matebuteler/android_device_samsung_sdm845-common" path="device/samsung/sdm845-common" remote="github" revision="lineage-18.1" />
+
+            <!-- Kernel -->
+            <project name="klabit87/android_kernel_samsung_sdm845" path="kernel/samsung/sdm845" remote="github" revision="lineage-18.0" />
+
+            <!-- Vendor Blobs -->
+            <project name="DotOS-Devices/proprietary_vendor_samsung_sdm845-common" path="vendor/samsung/sdm845-common" remote="github" revision="dot11" />
+
+            <!-- Hardware Samsung -->
             <project name="LineageOS/android_hardware_samsung" path="hardware/samsung" remote="github" revision="lineage-18.1" />
           </manifest>
           EOF
+          repo sync -c --no-tags --no-clone-bundle --optimized-fetch -j8 --force-sync
 
-          echo "=== Repo Sync (4并发，稳定防断) ==="
-          ~/bin/repo sync -c -j4 --force-sync --no-clone-bundle --no-tags
-
-          echo "=== 清理 .repo 隐藏目录吐出 25GB+ 空间 ==="
-          rm -rf .repo
-
-          echo "=== 应用 Patch 1: Samsung Touch 头文件补丁 ==="
-          if [ -d "device/samsung/sdm845-common/include" ] && [ -d "hardware/samsung/hidl/touch" ]; then
-              cp -f device/samsung/sdm845-common/include/*.h hardware/samsung/hidl/touch/ || true
-              echo "✅ Samsung touch headers 拷贝完成！"
-          fi
-
-          echo "=== 应用 Patch 2: UsbHostManager VID/PID 白名单补丁 ==="
-          python3 -c '
-          import os, re
-          path = "frameworks/base/services/usb/java/com/android/server/usb/UsbHostManager.java"
-          if os.path.exists(path):
-              with open(path, "r", encoding="utf-8") as f:
-                  content = f.read()
-              if "com.junkfood.seal" not in content:
-                  target = "private boolean isBlackListed(int vendorID, int productID) {"
-                  replacement = """private boolean isBlackListed(int vendorID, int productID) {
-              if (vendorID == 0x0000) {
-                  String[] allowedPackages = {"com.junkfood.seal", "com.zerodogs.min"};
-                  for (String pkg : allowedPackages) {
-                      if (isCallerInPackage(pkg)) return false;
-                  }
-              }"""
-                  content = content.replace(target, replacement)
-                  with open(path, "w", encoding="utf-8") as f:
-                      f.write(content)
-                  print("✅ UsbHostManager 补丁写入成功！")
-          '
-
-          echo "=== 应用 Patch 3: KeyboardInputMapper 虚拟键盘补丁 ==="
-          python3 -c '
-          import os, re
-          path = "frameworks/native/services/inputflinger/reader/mapper/KeyboardInputMapper.cpp"
-          if os.path.exists(path):
-              with open(path, "r", encoding="utf-8") as f:
-                  content = f.read()
-              if "VIRTUAL_KEYBOARD_ID" not in content:
-                  target = re.search(r"NotifyKeyArgs args\(.*?\);", content, re.DOTALL)
-                  if target:
-                      old_code = target.group(0)
-                      new_code = """int32_t finalDeviceId = deviceId;
-              if (getDeviceContext().getIdentifier().vendor == 0x0000 && getDeviceContext().getIdentifier().product == 0x0000) {
-                  finalDeviceId = -1; // VIRTUAL_KEYBOARD_ID
-              }
-              """ + old_code.replace("deviceId,", "finalDeviceId,")
-                      content = content.replace(old_code, new_code)
-                      with open(path, "w", encoding="utf-8") as f:
-                          f.write(content)
-                      print("✅ KeyboardInputMapper 虚拟键盘补丁写入成功！")
-          '
-
-      - name: Compile LineageOS ROM
+      # ==========================================
+      # 补丁 1：补充 samsung_touch.h 头文件依赖
+      # ==========================================
+      - name: Fix Samsung Hardware Missing Headers
         run: |
           cd /home/runner/lineage
+          echo "🔧 正在补充 samsung_touch.h 头文件依赖..."
+          mkdir -p hardware/samsung/hidl/touch
+          mkdir -p hardware/samsung/include
+          cp -rf device/samsung/sdm845-common/include/* hardware/samsung/hidl/touch/ 2>/dev/null || true
+          cp -rf device/samsung/sdm845-common/include/* hardware/samsung/include/ 2>/dev/null || true
+          echo "✅ 头文件补全完毕！"
 
-          echo "=== 1. 配置 Ccache 强力缓存参数 ==="
-          export CCACHE_DIR=/home/runner/.cache/ccache
+      # ==========================================
+      # 补丁 2：USB VID 白名单补丁
+      # ==========================================
+      - name: Apply USB VID Whitelist Patch
+        run: |
+          cd /home/runner/lineage
+          python3 -c '
+          import re
+          path = "frameworks/base/services/usb/java/com/android/server/usb/UsbHostManager.java"
+          with open(path, "r") as f:
+              content = f.read()
+
+          old_code = """    public void getDeviceList(Bundle devices) {
+              synchronized (mLock) {
+                  for (String name : mDevices.keySet()) {
+                      devices.putParcelable(name, mDevices.get(name));
+                  }
+              }
+          }"""
+
+          new_code = """    public void getDeviceList(Bundle devices) {
+              synchronized (mLock) {
+                  int callingUid = Binder.getCallingUid();
+                  String[] packages = mContext.getPackageManager().getPackagesForUid(callingUid);
+
+                  boolean isWhitelisted = false;
+                  if (packages != null) {
+                      for (String pkg : packages) {
+                          if ("com.junkfood.seal".equals(pkg) || "com.zerodogs.min".equals(pkg)) {
+                              isWhitelisted = true;
+                              break;
+                          }
+                      }
+                  }
+
+                  for (String name : mDevices.keySet()) {
+                      UsbDevice device = mDevices.get(name);
+                      if (device != null && device.getVendorId() == 0x0000 && !isWhitelisted) {
+                          continue;
+                      }
+                      devices.putParcelable(name, device);
+                  }
+              }
+          }"""
+
+          if old_code in content:
+              content = content.replace(old_code, new_code)
+              with open(path, "w") as f:
+                  f.write(content)
+              print("✅ 白名单代码补丁成功应用！")
+          elif re.search(r"public void getDeviceList\(Bundle devices\) \{[\s\S]*?\}\n    \}", content):
+              content = re.sub(r"public void getDeviceList\(Bundle devices\) \{[\s\S]*?\}\n    \}", new_code.strip(), content)
+              with open(path, "w") as f:
+                  f.write(content)
+              print("✅ 正则匹配成功，白名单补丁已打入！")
+          else:
+              print("⚠️ 未匹配到方法")
+          '
+
+      # ==========================================
+      # 补丁 3：InputReader 虚拟键盘全键生效补丁 (VID:0x0000 PID:0x0000)
+      # ==========================================
+      - name: Apply InputReader Virtual Keyboard All-Keys Patch
+        run: |
+          cd /home/runner/lineage
+          python3 -c '
+          import os, re
+
+          candidates = [
+              "frameworks/native/services/inputflinger/reader/mapper/KeyboardInputMapper.cpp",
+              "frameworks/native/services/inputflinger/InputReader.cpp"
+          ]
+
+          target_file = None
+          for p in candidates:
+              if os.path.exists(p):
+                  target_file = p
+                  break
+
+          if not target_file:
+              print("⚠️ 未找到 KeyboardInputMapper 源码文件，跳过")
+              exit(0)
+
+          with open(target_file, "r") as f:
+              content = f.read()
+
+          patch_logic = """
+              // [CUSTOM PATCH] 针对 0x0000:0x0000 键盘设备，所有按键均重置为 Virtual 虚拟设备
+              int32_t finalDeviceId = getDeviceId();
+              const auto& _ident = getDeviceContext().getDeviceIdentifier();
+              if (_ident.vendor == 0x0000 && _ident.product == 0x0000) {
+                  finalDeviceId = -1; // ReservedInputDeviceId::VIRTUAL_KEYBOARD_ID
+              }
+          """
+
+          if "NotifyKeyArgs args(" in content:
+              content = content.replace("getDeviceId()", "finalDeviceId")
+              pattern = r"(void\s+KeyboardInputMapper::processKey\s*\([^)]*\)\s*\{)"
+              content = re.sub(pattern, r"\1" + patch_logic, content, count=1)
+              with open(target_file, "w") as f:
+                  f.write(content)
+              print(f"✅ 虚拟键盘全按键 Hook 补丁精准注入成功: {target_file}")
+          else:
+              print("⚠️ 未匹配到 NotifyKeyArgs 调用点")
+          '
+
+      # ==========================================
+      # 3. 智能接力编译 + 防竞争空间守护进程
+      # ==========================================
+      - name: Clean .repo & Build ROM with Ccache
+        id: build_rom
+        timeout-minutes: 300
+        env:
+          BUILD_STAGE: ${{ inputs.build_stage }}
+        run: |
+          cd /home/runner/lineage
+          rm -rf .repo
+          echo "=== 删掉 .repo 后的磁盘空间 ==="
+          df -h
+
+          # Ccache 极致命中率配置
           export USE_CCACHE=1
           export CCACHE_EXEC=/usr/bin/ccache
+          export CCACHE_DIR=/home/runner/.cache/ccache
           export CCACHE_BASEDIR=/home/runner/lineage
           export CCACHE_NOHASHDIR=1
           export CCACHE_COMPILERCHECK=content
           export CCACHE_SLOPPINESS=include_file_ctime,include_file_mtime,time_macros,file_macro
           ccache -M 8G
-          ccache -z
+          export NINJA_ARGS="-j4"
+          export SOURCE_DATE_EPOCH=1666051200
 
-          echo "=== 2. 启动 35GB 高位安全防竞争空间守护进程 ==="
+          source build/envsetup.sh
+          lunch lineage_star2qltechn-userdebug
+          export SOONG_MAX_LINK_JOBS=1
+
+          # 🧹 高位防竞争守护进程：35GB 水位预警 + mtime > 60s 时间锁
           cat << 'PYEOF' > /tmp/disk_cleaner.py
           import os, time, shutil
 
@@ -157,12 +254,14 @@ jobs:
           KERNEL_OBJ = os.path.join(OUT_DIR, "obj/KERNEL_OBJ")
           SYMBOLS_DIR = os.path.join(OUT_DIR, "symbols")
 
-          print("🛡️ [DiskCleaner] 35GB高位防竞争守护进程已启动...", flush=True)
-
           while True:
               time.sleep(30)
               try:
-                  # 1. 随产随清 symbols 调试符号 (不留隐患)
+                  st = os.statvfs("/")
+                  avail_gb = (st.f_bavail * st.f_frsize) / (1024 * 1024 * 1024)
+                  now = time.time()
+
+                  # 随产随清调试符号
                   if os.path.exists(SYMBOLS_DIR):
                       for item in os.listdir(SYMBOLS_DIR):
                           p = os.path.join(SYMBOLS_DIR, item)
@@ -171,13 +270,9 @@ jobs:
                               else: os.remove(p)
                           except: pass
 
-                  # 2. 检查空间，低于 35GB 立刻触发回收
-                  st = os.statvfs("/")
-                  avail_gb = (st.f_bavail * st.f_frsize) / (1024 * 1024 * 1024)
-                  now = time.time()
-
+                  # 水位预警：低于 35GB 时触发防竞争清理
                   if avail_gb < 35.0:
-                      print(f"\n[DiskCleaner] ⚠️ 磁盘可用空间仅剩 {avail_gb:.1f}GB < 35GB，启动高位回收...", flush=True)
+                      print(f"\n[DiskCleaner] ⚠️ 磁盘剩余空间仅剩 {avail_gb:.1f}GB，触发主动空间回收...", flush=True)
 
                       if os.path.exists(OUT_DIR):
                           for root, dirs, files in os.walk(OUT_DIR):
@@ -185,7 +280,6 @@ jobs:
                                   if f.endswith(('.o.cmd', '.d', '.cmd')):
                                       fp = os.path.join(root, f)
                                       try:
-                                          # 关键防竞争：只删生成超过 60 秒的旧文件
                                           if now - os.path.getmtime(fp) > 60:
                                               os.remove(fp)
                                       except: pass
@@ -202,45 +296,83 @@ jobs:
                                       except: pass
 
                       print("[DiskCleaner] ✅ 空间回收完成！", flush=True)
-              except Exception as e:
-                  pass
+              except: pass
           PYEOF
           python3 /tmp/disk_cleaner.py &
           CLEANER_PID=$!
 
-          echo "=== 3. 环境变量与防 OOM 并发控制 ==="
-          source build/envsetup.sh
-          breakfast star2qltechn
-          export SOONG_MAX_LINK_JOBS=1
+          echo "🚀 当前任务模式: $BUILD_STAGE"
 
-          echo "=== 4. 开始最终编译 (mka bacon) ==="
-          mka bacon || {
-              echo "❌ 编译终止！清理守护进程 PID: $CLEANER_PID"
-              kill -9 $CLEANER_PID || true
-              exit 1
-          }
+          # 阶段一：第1次运行
+          if [[ "$BUILD_STAGE" == *"第 1 次"* ]]; then
+            mka bacon 2>&1 | python3 -c '
+          import sys, re, subprocess
+          target_pct = 55
+          min_total_tasks = 80000
+          last_pct = -1
+          for line in sys.stdin:
+              m = re.search(r"\[\s*(\d+)%\s+(\d+)/(\d+)\]", line)
+              if m:
+                  pct, current, total = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                  if pct != last_pct:
+                      print(f"🚀 编译进度: {pct}% ({current}/{total})", flush=True)
+                      last_pct = pct
+                  if total >= min_total_tasks and pct >= target_pct:
+                      print(f"\n🎉 [第 1 次接力完成] 全量任务已达 {pct}%！安全停止并保存 Ccache 缓存...", flush=True)
+                      subprocess.run(["pkill", "-TERM", "-f", "ninja"], check=False)
+                      subprocess.run(["pkill", "-TERM", "-f", "mka"], check=False)
+                      sys.exit(0)
+              elif "FAILED" in line or "error:" in line or "Completed" in line:
+                  print(line, end="", flush=True)
+            ' || true
 
-          kill -9 $CLEANER_PID || true
-          echo "=== Ccache 最终命中统计 ==="
-          ccache -s
+          # 阶段二：第2次运行
+          else
+            mka bacon 2>&1 | python3 -c '
+          import sys, re
+          last_pct = -1
+          for line in sys.stdin:
+              m = re.search(r"\[\s*(\d+)%\s+(\d+)/(\d+)\]", line)
+              if m:
+                  pct, current, total = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                  if pct != last_pct:
+                      print(f"🚀 编译进度: {pct}% ({current}/{total})", flush=True)
+                      last_pct = pct
+              elif "FAILED" in line or "error:" in line or "Completed" in line:
+                  print(line, end="", flush=True)
+            '
+          fi
 
-      # ----------------------------------------------------
-      # Ccache 保存步骤
-      # ----------------------------------------------------
-      - name: Save Ccache
-        uses: actions/cache/save@v4
+          kill -9 $CLEANER_PID 2>/dev/null || true
+
+      # ==========================================
+      # 4. 保存 Ccache 缓存
+      # ==========================================
+      - name: Save Ccache (Always on Success, Failure, Timeout, or Cancel)
         if: always()
+        uses: actions/cache/save@v4
         with:
           path: /home/runner/.cache/ccache
-          key: ccache-Linux-lineage18-${{ github.run_id }}
+          key: ccache-${{ runner.os }}-lineage18-${{ steps.timestamp.outputs.ts }}
 
-      - name: Upload ROM Artifact
+      - name: Show Ccache Stats & Disk Info
+        if: always()
+        run: |
+          export CCACHE_DIR=/home/runner/.cache/ccache
+          echo "=== Ccache 缓存命中与占用统计 ==="
+          ccache -s || true
+          echo "=== 当前磁盘剩余空间 ==="
+          df -h
+
+      # ==========================================
+      # 5. 上传最终产物
+      # ==========================================
+      - name: Upload ROM & Flashable Images
+        if: success() && contains(inputs.build_stage, '第 2 次')
         uses: actions/upload-artifact@v4
-        if: success()
         with:
-          name: LineageOS-18.1-star2qltechn
+          name: LineageOS-18.1-star2qltechn-Package
           path: |
-            /home/runner/lineage/out/target/product/star2qltechn/lineage-*.zip
+            /home/runner/lineage/out/target/product/star2qltechn/lineage-18.1-*.zip
             /home/runner/lineage/out/target/product/star2qltechn/boot.img
             /home/runner/lineage/out/target/product/star2qltechn/recovery.img
-          retention-days: 7
