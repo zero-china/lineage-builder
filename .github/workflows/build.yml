@@ -2,12 +2,27 @@ name: Build LineageOS 18.1 for Samsung S9+ (star2qltechn)
 
 on:
   workflow_dispatch:
+    inputs:
+      build_stage:
+        description: '请选择编译阶段'
+        required: true
+        type: choice
+        default: '第 1 次运行 (编到 55% 自动安全刹车并存缓存)'
+        options:
+          - '第 1 次运行 (编到 55% 自动安全刹车并存缓存)'
+          - '第 2 次运行 (全量冲刺 100% 打包出 ROM)'
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 350
+
     steps:
-      - name: Deep Cleanup Disk Space & Setup 16G Swap
+      - name: Generate Timestamp
+        id: timestamp
+        run: echo "ts=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: Deep Cleanup Disk Space & Setup 10G Swap
         run: |
           sudo swapoff -a 2>/dev/null || true
           sudo rm -f /swapfile 2>/dev/null || true
@@ -20,11 +35,16 @@ jobs:
           sudo rm -rf /usr/local/julia*
           sudo rm -rf /usr/local/aws*
           sudo rm -rf /var/lib/docker
-          sudo fallocate -l 16G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
+          sudo rm -rf /var/lib/containerd
+          sudo rm -rf /usr/lib/llvm-*
+          sudo apt-get clean
+          sudo rm -rf /var/cache/apt/archives/*
+          # 创建 10GB Swap
+          sudo fallocate -l 10G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1M count=10240
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
-          echo "=== 磁盘空间结果 ==="
+          echo "=== 磁盘清理后状态 ==="
           df -h
 
       - name: Install Build Tools & Dependencies
@@ -35,13 +55,13 @@ jobs:
           sudo curl https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
           sudo chmod a+rx /usr/local/bin/repo
 
-      - name: Restore 10GB Ccache
+      - name: Restore Ccache
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/ccache
-          key: ccache-${{ runner.os }}-${{ github.run_id }}
+          key: ccache-${{ runner.os }}-lineage18-${{ steps.timestamp.outputs.ts }}
           restore-keys: |
-            ccache-${{ runner.os }}-
+            ccache-${{ runner.os }}-lineage18-
 
       - name: Initialize Repo & Manifests
         run: |
@@ -51,10 +71,17 @@ jobs:
           cat << 'EOF' > .repo/local_manifests/roomservice.xml
           <?xml version="1.0" encoding="UTF-8"?>
           <manifest>
+            <!-- Device Trees -->
             <project name="matebuteler/android_device_samsung_star2qltechn" path="device/samsung/star2qltechn" remote="github" revision="lineage-18.1" />
             <project name="matebuteler/android_device_samsung_sdm845-common" path="device/samsung/sdm845-common" remote="github" revision="lineage-18.1" />
+
+            <!-- Kernel -->
             <project name="klabit87/android_kernel_samsung_sdm845" path="kernel/samsung/sdm845" remote="github" revision="lineage-18.0" />
+
+            <!-- Vendor Blobs -->
             <project name="DotOS-Devices/proprietary_vendor_samsung_sdm845-common" path="vendor/samsung/sdm845-common" remote="github" revision="dot11" />
+
+            <!-- Hardware Samsung -->
             <project name="LineageOS/android_hardware_samsung" path="hardware/samsung" remote="github" revision="lineage-18.1" />
           </manifest>
           EOF
@@ -107,49 +134,93 @@ jobs:
               with open(path, "w") as f:
                   f.write(content)
               print("✅ 白名单代码补丁成功应用！")
+          elif re.search(r"public void getDeviceList\(Bundle devices\) \{[\s\S]*?\}\n    \}", content):
+              content = re.sub(r"public void getDeviceList\(Bundle devices\) \{[\s\S]*?\}\n    \}", new_code.strip(), content)
+              with open(path, "w") as f:
+                  f.write(content)
+              print("✅ 正则匹配成功，白名单补丁已打入！")
           else:
-              print("⚠️ 未匹配到方法，尝试正则替换...")
+              print("⚠️ 未匹配到方法")
           '
 
-      - name: Build ROM with Ccache
+      # ==========================================
+      # 智能接力编译（加入总任务数过滤：必须 > 80,000 才算全量阶段）
+      # ==========================================
+      - name: Clean .repo & Build ROM with Ccache
+        id: build_rom
+        timeout-minutes: 300
+        env:
+          BUILD_STAGE: ${{ inputs.build_stage }}
         run: |
           cd ~/lineage
           rm -rf .repo
+          echo "=== 删掉 .repo 后的磁盘空间 ==="
+          df -h
+
           export USE_CCACHE=1
           export CCACHE_EXEC=/usr/bin/ccache
           export CCACHE_DIR=~/.cache/ccache
-          ccache -M 10G
+          ccache -M 8G
           export NINJA_ARGS="-j4"
           export SOURCE_DATE_EPOCH=1666051200
           source build/envsetup.sh
           lunch lineage_star2qltechn-userdebug
+
+          echo "🚀 当前任务模式: $BUILD_STAGE"
+
+          # 启动编译并在 Python 中监控进度
           mka bacon 2>&1 | python3 -c '
-          import sys, re
+          import sys, re, os, signal, subprocess
+
+          stage = os.environ.get("BUILD_STAGE", "")
+          is_first_stage = "第 1 次" in stage
+          target_pct = 55       # 刹车目标百分比
+          min_total_tasks = 80000  # 👈 核心防坑：总任务数必须大于8万（排除前置小阶段）
           last_pct = -1
+
           for line in sys.stdin:
               m = re.search(r"\[\s*(\d+)%\s+(\d+)/(\d+)\]", line)
               if m:
                   pct = int(m.group(1))
+                  current = int(m.group(2))
                   total = int(m.group(3))
-                  if total < 1000:
-                      continue
+
                   if pct != last_pct:
-                      print(f"🚀 编译进度: {pct}% ({m.group(2)}/{m.group(3)})")
+                      print(f"🚀 编译进度: {pct}% ({current}/{total})")
                       sys.stdout.flush()
                       last_pct = pct
+
+                  # 只有当处于【真实全量大任务阶段(total >= 80000)】且【达到55%】时才刹车
+                  if is_first_stage and total >= min_total_tasks and pct >= target_pct:
+                      print(f"\n🎉 [第 1 次接力完成] 全量任务 ({current}/{total}) 已达 {pct}%！安全停止并保存 Ccache 缓存...")
+                      sys.stdout.flush()
+                      subprocess.run(["pkill", "-TERM", "-f", "ninja"], check=False)
+                      subprocess.run(["pkill", "-TERM", "-f", "mka"], check=False)
+                      sys.exit(0)
+
               elif "FAILED" in line or "error:" in line or "Completed" in line:
                   print(line, end="")
                   sys.stdout.flush()
-          '
+          ' || true
 
-      - name: Save 10GB Ccache Always
-        uses: actions/cache/save@v4
+      - name: Save Ccache (Always on Success, Failure, Timeout, or Cancel)
         if: always()
+        uses: actions/cache/save@v4
         with:
           path: ~/.cache/ccache
-          key: ccache-${{ runner.os }}-${{ github.run_id }}
+          key: ccache-${{ runner.os }}-lineage18-${{ steps.timestamp.outputs.ts }}
+
+      - name: Show Ccache Stats & Disk Info
+        if: always()
+        run: |
+          export CCACHE_DIR=~/.cache/ccache
+          echo "=== Ccache 缓存命中与占用统计 ==="
+          ccache -s || true
+          echo "=== 当前磁盘剩余空间 ==="
+          df -h
 
       - name: Upload ROM Zip File
+        if: success() && contains(inputs.build_stage, '第 2 次')
         uses: actions/upload-artifact@v4
         with:
           name: LineageOS-18.1-star2qltechn-ROM
