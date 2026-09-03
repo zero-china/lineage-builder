@@ -39,7 +39,6 @@ jobs:
           sudo rm -rf /usr/lib/llvm-*
           sudo apt-get clean
           sudo rm -rf /var/cache/apt/archives/*
-          # 10G Swap 保护内存，留出最大磁盘空间
           sudo fallocate -l 10G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1M count=10240
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
@@ -67,7 +66,7 @@ jobs:
             ccache-${{ runner.os }}-lineage18-
 
       # ==========================================
-      # 2. 缓存路径纠偏（确保 100% 将缓存归位至 /home/runner/.cache/ccache）
+      # 2. 缓存路径对齐
       # ==========================================
       - name: Align and Verify Ccache Directory
         run: |
@@ -168,7 +167,7 @@ jobs:
           '
 
       # ==========================================
-      # 3. 智能接力编译 + AOSP 极致高命中率环境 + 动态空间瘦身
+      # 3. 智能接力编译 + 安全空间瘦身
       # ==========================================
       - name: Clean .repo & Build ROM with Ccache
         id: build_rom
@@ -181,9 +180,6 @@ jobs:
           echo "=== 删掉 .repo 后的磁盘空间 ==="
           df -h
 
-          # ==========================================
-          # 🚀 Ccache AOSP 专属高命中率环境变量（关键加速配置）
-          # ==========================================
           export USE_CCACHE=1
           export CCACHE_EXEC=/usr/bin/ccache
           export CCACHE_DIR=/home/runner/.cache/ccache
@@ -195,11 +191,10 @@ jobs:
           export NINJA_ARGS="-j4"
           export SOURCE_DATE_EPOCH=1666051200
 
-          # 必须在上述环境变量设置完毕后再 source
           source build/envsetup.sh
           lunch lineage_star2qltechn-userdebug
 
-          # 🧹 强力空间回收后台守护进程：清理内核废料与超大 symbols
+          # 🧹 安全空间守护进程：只清理中间临时 .o 和 symbols，绝不误删系统源码
           cat << 'PYEOF' > /tmp/disk_cleaner.py
           import os, time, shutil
 
@@ -211,6 +206,7 @@ jobs:
           while True:
               time.sleep(20)
               try:
+                  # 只清理 obj/KERNEL_OBJ 下由 make 生成的中间 .o 文件
                   if not cleaned_kernel and os.path.exists(KERNEL_OBJ):
                       boot_img = os.path.join(OUT_DIR, "boot.img")
                       kernel_bin = os.path.join(KERNEL_OBJ, "arch/arm64/boot/Image.gz-dtb")
@@ -220,8 +216,8 @@ jobs:
                                   if f.endswith(('.o', '.o.cmd', '.o.d', '.a')) and not f.startswith('Image'):
                                       try: os.remove(os.path.join(root, f))
                                       except: pass
-                          shutil.rmtree("/home/runner/lineage/kernel", ignore_errors=True)
                           cleaned_kernel = True
+                  # 清理 symbols 目录
                   if os.path.exists(SYMBOLS_DIR):
                       for item in os.listdir(SYMBOLS_DIR):
                           item_path = os.path.join(SYMBOLS_DIR, item)
@@ -259,10 +255,10 @@ jobs:
                   print(line, end="", flush=True)
             ' || true
 
-          # 阶段二：第2次运行（全量冲刺 + 打包前极限瘦身）
+          # 阶段二：第2次运行（全量冲刺）
           else
-            # 1. 编译全量目标文件
-            mka target-files-package 2>&1 | python3 -c '
+            # 直接使用 bacon 构建，由后台守护进程安全释放空间
+            mka bacon 2>&1 | python3 -c '
           import sys, re
           last_pct = -1
           for line in sys.stdin:
@@ -275,19 +271,6 @@ jobs:
               elif "FAILED" in line or "error:" in line or "Completed" in line:
                   print(line, end="", flush=True)
             '
-
-            # 2. 打包前精准删除用完的巨型源码（秒级回血 15GB+）
-            echo "🧹 [空间绝杀] 正在精准清理已完成使命的庞大源码，为最后打包留出绝对安全空间..."
-            rm -rf /home/runner/lineage/kernel
-            rm -rf /home/runner/lineage/art
-            rm -rf /home/runner/lineage/external/chromium-webview
-            rm -rf /home/runner/lineage/external/skia
-            rm -rf /home/runner/lineage/frameworks/base/core/java
-            echo "=== 打包前磁盘可用空间 ==="
-            df -h
-
-            # 3. 生成最终 ROM 卡刷包
-            mka bacon
           fi
 
           kill -9 $CLEANER_PID 2>/dev/null || true
