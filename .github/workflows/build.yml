@@ -2,11 +2,19 @@ name: Build LineageOS 18.1 for Samsung S9+ (star2qltechn)
 
 on:
   workflow_dispatch:
+    inputs:
+      build_stage:
+        description: '请选择编译阶段'
+        required: true
+        type: choice
+        default: '第 1 次运行 (编到 55% 自动安全刹车并存缓存)'
+        options:
+          - '第 1 次运行 (编到 55% 自动安全刹车并存缓存)'
+          - '第 2 次运行 (全量冲刺 100% 打包出 ROM)'
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    # Job 总超时设为 350 分钟（5小时50分），留出足够缓冲给后续缓存上传
     timeout-minutes: 350
 
     steps:
@@ -14,7 +22,7 @@ jobs:
         id: timestamp
         run: echo "ts=$(date +%s)" >> $GITHUB_OUTPUT
 
-      - name: Deep Cleanup Disk Space & Setup 16G Swap
+      - name: Deep Cleanup Disk Space & Setup 10G Swap
         run: |
           sudo swapoff -a 2>/dev/null || true
           sudo rm -f /swapfile 2>/dev/null || true
@@ -27,11 +35,16 @@ jobs:
           sudo rm -rf /usr/local/julia*
           sudo rm -rf /usr/local/aws*
           sudo rm -rf /var/lib/docker
-          sudo fallocate -l 16G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
+          sudo rm -rf /var/lib/containerd
+          sudo rm -rf /usr/lib/llvm-*
+          sudo apt-get clean
+          sudo rm -rf /var/cache/apt/archives/*
+          # 创建 10GB Swap
+          sudo fallocate -l 10G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1M count=10240
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
-          echo "=== 磁盘空间结果 ==="
+          echo "=== 磁盘清理后状态 ==="
           df -h
 
       - name: Install Build Tools & Dependencies
@@ -42,9 +55,6 @@ jobs:
           sudo curl https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
           sudo chmod a+rx /usr/local/bin/repo
 
-      # ==========================================
-      # 1. 恢复缓存：自动匹配最新保存的一份 ccache
-      # ==========================================
       - name: Restore Ccache
         uses: actions/cache/restore@v4
         with:
@@ -134,27 +144,39 @@ jobs:
           '
 
       # ==========================================
-      # 2. 编译步骤：限制此步最多运行 5 个小时 (300 分钟)
-      # 如果 5 小时没编完，会自动跳出并进入下一步保存已编译好的 Ccache
+      # 智能接力编译（支持选择第1次或第2次运行）
       # ==========================================
       - name: Clean .repo & Build ROM with Ccache
         id: build_rom
         timeout-minutes: 300
+        env:
+          BUILD_STAGE: ${{ inputs.build_stage }}
         run: |
           cd ~/lineage
           rm -rf .repo
+          echo "=== 删掉 .repo 后的磁盘空间 ==="
+          df -h
+
           export USE_CCACHE=1
           export CCACHE_EXEC=/usr/bin/ccache
           export CCACHE_DIR=~/.cache/ccache
-          ccache -M 10G
+          ccache -M 8G
           export NINJA_ARGS="-j4"
-          # 锁定编译时间戳为官方 LineageOS 18.1 历史发布时间 (2022-10-18 00:00:00 UTC)
           export SOURCE_DATE_EPOCH=1666051200
           source build/envsetup.sh
           lunch lineage_star2qltechn-userdebug
+
+          echo "🚀 当前任务模式: $BUILD_STAGE"
+
+          # 启动编译并在 Python 中监控进度
           mka bacon 2>&1 | python3 -c '
-          import sys, re
+          import sys, re, os, signal, subprocess
+
+          stage = os.environ.get("BUILD_STAGE", "")
+          is_first_stage = "第 1 次" in stage
+          target_pct = 55  # 第1次接力目标：55%
           last_pct = -1
+
           for line in sys.stdin:
               m = re.search(r"\[\s*(\d+)%\s+(\d+)/(\d+)\]", line)
               if m:
@@ -163,15 +185,20 @@ jobs:
                       print(f"🚀 编译进度: {pct}% ({m.group(2)}/{m.group(3)})")
                       sys.stdout.flush()
                       last_pct = pct
+
+                  # 如果是第1次运行且达到 55%，主动安全刹车
+                  if is_first_stage and pct >= target_pct:
+                      print(f"\n🎉 [第 1 次接力完成] 已成功编译至 {pct}%！正在安全终止编译并保存 Ccache 缓存...")
+                      sys.stdout.flush()
+                      subprocess.run(["pkill", "-TERM", "-f", "ninja"], check=False)
+                      subprocess.run(["pkill", "-TERM", "-f", "mka"], check=False)
+                      sys.exit(0)
+
               elif "FAILED" in line or "error:" in line or "Completed" in line:
                   print(line, end="")
                   sys.stdout.flush()
-          '
+          ' || true
 
-      # ==========================================
-      # 3. 强制保存缓存：
-      # 无论成功、失败、单步 5 小时超时、或者手动 Cancel，都会执行！
-      # ==========================================
       - name: Save Ccache (Always on Success, Failure, Timeout, or Cancel)
         if: always()
         uses: actions/cache/save@v4
@@ -179,14 +206,17 @@ jobs:
           path: ~/.cache/ccache
           key: ccache-${{ runner.os }}-lineage18-${{ steps.timestamp.outputs.ts }}
 
-      - name: Show Ccache Stats
+      - name: Show Ccache Stats & Disk Info
         if: always()
         run: |
           export CCACHE_DIR=~/.cache/ccache
+          echo "=== Ccache 缓存命中与占用统计 ==="
           ccache -s || true
+          echo "=== 当前磁盘剩余空间 ==="
+          df -h
 
       - name: Upload ROM Zip File
-        if: success()
+        if: success() && contains(inputs.build_stage, '第 2 次')
         uses: actions/upload-artifact@v4
         with:
           name: LineageOS-18.1-star2qltechn-ROM
