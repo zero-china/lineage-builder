@@ -39,6 +39,7 @@ jobs:
           sudo rm -rf /usr/lib/llvm-*
           sudo apt-get clean
           sudo rm -rf /var/cache/apt/archives/*
+          # 10G Swap 保护内存，留出最大磁盘空间
           sudo fallocate -l 10G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1M count=10240
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
@@ -55,7 +56,7 @@ jobs:
           sudo chmod a+rx /usr/local/bin/repo
 
       # ==========================================
-      # 1. 恢复 Ccache（统一严格使用 ~/.cache/ccache 路径以完美命中 3.6GB）
+      # 1. 恢复 Ccache
       # ==========================================
       - name: Restore Ccache
         uses: actions/cache/restore@v4
@@ -65,9 +66,32 @@ jobs:
           restore-keys: |
             ccache-${{ runner.os }}-lineage18-
 
+      # ==========================================
+      # 2. 核心补丁：智能检测并纠偏 Ccache 真实路径（确保 100% 吃到 4GB 缓存）
+      # ==========================================
+      - name: Align and Verify Ccache Directory
+        run: |
+          mkdir -p /home/runner/.cache/ccache
+
+          # 检查 GitHub 是否解压到了工作区目录中
+          if [ -d "$GITHUB_WORKSPACE/.cache/ccache" ]; then
+            echo "🔧 检测到缓存解压在工作区相对路径，正在迁移至 /home/runner/.cache/ccache..."
+            cp -rn $GITHUB_WORKSPACE/.cache/ccache/* /home/runner/.cache/ccache/ 2>/dev/null || true
+          fi
+
+          # 检查当前运行目录下是否有 ccache 目录
+          if [ -d "$PWD/.cache/ccache" ] && [ "$PWD" != "/home/runner" ]; then
+            echo "🔧 检测到当前目录缓存，正在合并..."
+            cp -rn $PWD/.cache/ccache/* /home/runner/.cache/ccache/ 2>/dev/null || true
+          fi
+
+          export CCACHE_DIR=/home/runner/.cache/ccache
+          echo "=== 校验恢复后的 Ccache 状态 ==="
+          ccache -s
+
       - name: Initialize Repo & Manifests
         run: |
-          mkdir -p ~/lineage && cd ~/lineage
+          mkdir -p /home/runner/lineage && cd /home/runner/lineage
           repo init -u https://github.com/LineageOS/android.git -b lineage-18.1 --no-clone-bundle --git-lfs --depth=1 -g default,-darwin
           mkdir -p .repo/local_manifests
           cat << 'EOF' > .repo/local_manifests/roomservice.xml
@@ -91,7 +115,7 @@ jobs:
 
       - name: Apply USB VID Whitelist Patch
         run: |
-          cd ~/lineage
+          cd /home/runner/lineage
           python3 -c '
           import re
           path = "frameworks/base/services/usb/java/com/android/server/usb/UsbHostManager.java"
@@ -146,7 +170,7 @@ jobs:
           '
 
       # ==========================================
-      # 2. 智能接力编译 + 动态空间瘦身守护进程
+      # 3. 智能接力编译 + 动态空间瘦身守护进程
       # ==========================================
       - name: Clean .repo & Build ROM with Ccache
         id: build_rom
@@ -154,14 +178,14 @@ jobs:
         env:
           BUILD_STAGE: ${{ inputs.build_stage }}
         run: |
-          cd ~/lineage
+          cd /home/runner/lineage
           rm -rf .repo
           echo "=== 删掉 .repo 后的磁盘空间 ==="
           df -h
 
           export USE_CCACHE=1
           export CCACHE_EXEC=/usr/bin/ccache
-          export CCACHE_DIR=~/.cache/ccache
+          export CCACHE_DIR=/home/runner/.cache/ccache
           ccache -M 8G
           export NINJA_ARGS="-j4"
           export SOURCE_DATE_EPOCH=1666051200
@@ -172,7 +196,7 @@ jobs:
           cat << 'PYEOF' > /tmp/disk_cleaner.py
           import os, time, shutil
 
-          OUT_DIR = os.path.expanduser("~/lineage/out/target/product/star2qltechn")
+          OUT_DIR = "/home/runner/lineage/out/target/product/star2qltechn"
           KERNEL_OBJ = os.path.join(OUT_DIR, "obj/KERNEL_OBJ")
           SYMBOLS_DIR = os.path.join(OUT_DIR, "symbols")
           cleaned_kernel = False
@@ -189,7 +213,7 @@ jobs:
                                   if f.endswith(('.o', '.o.cmd', '.o.d', '.a')) and not f.startswith('Image'):
                                       try: os.remove(os.path.join(root, f))
                                       except: pass
-                          shutil.rmtree(os.path.expanduser("~/lineage/kernel"), ignore_errors=True)
+                          shutil.rmtree("/home/runner/lineage/kernel", ignore_errors=True)
                           cleaned_kernel = True
                   if os.path.exists(SYMBOLS_DIR):
                       for item in os.listdir(SYMBOLS_DIR):
@@ -247,11 +271,11 @@ jobs:
 
             # 2. 打包前精准删除用完的巨型源码（秒级回血 15GB+）
             echo "🧹 [空间绝杀] 正在精准清理已完成使命的庞大源码，为最后打包留出绝对安全空间..."
-            rm -rf ~/lineage/kernel
-            rm -rf ~/lineage/art
-            rm -rf ~/lineage/external/chromium-webview
-            rm -rf ~/lineage/external/skia
-            rm -rf ~/lineage/frameworks/base/core/java
+            rm -rf /home/runner/lineage/kernel
+            rm -rf /home/runner/lineage/art
+            rm -rf /home/runner/lineage/external/chromium-webview
+            rm -rf /home/runner/lineage/external/skia
+            rm -rf /home/runner/lineage/frameworks/base/core/java
             echo "=== 打包前磁盘可用空间 ==="
             df -h
 
@@ -262,26 +286,26 @@ jobs:
           kill -9 $CLEANER_PID 2>/dev/null || true
 
       # ==========================================
-      # 3. 统一保存 Ccache（路径严格对应 ~/.cache/ccache）
+      # 4. 保存 Ccache 缓存
       # ==========================================
       - name: Save Ccache (Always on Success, Failure, Timeout, or Cancel)
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: ~/.cache/ccache
+          path: /home/runner/.cache/ccache
           key: ccache-${{ runner.os }}-lineage18-${{ steps.timestamp.outputs.ts }}
 
       - name: Show Ccache Stats & Disk Info
         if: always()
         run: |
-          export CCACHE_DIR=~/.cache/ccache
+          export CCACHE_DIR=/home/runner/.cache/ccache
           echo "=== Ccache 缓存命中与占用统计 ==="
           ccache -s || true
           echo "=== 当前磁盘剩余空间 ==="
           df -h
 
       # ==========================================
-      # 4. 上传最终产物
+      # 5. 上传最终产物
       # ==========================================
       - name: Upload ROM & Flashable Images
         if: success() && contains(inputs.build_stage, '第 2 次')
@@ -289,6 +313,6 @@ jobs:
         with:
           name: LineageOS-18.1-star2qltechn-Package
           path: |
-            ~/lineage/out/target/product/star2qltechn/lineage-18.1-*.zip
-            ~/lineage/out/target/product/star2qltechn/boot.img
-            ~/lineage/out/target/product/star2qltechn/recovery.img
+            /home/runner/lineage/out/target/product/star2qltechn/lineage-18.1-*.zip
+            /home/runner/lineage/out/target/product/star2qltechn/boot.img
+            /home/runner/lineage/out/target/product/star2qltechn/recovery.img
