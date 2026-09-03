@@ -7,7 +7,7 @@ on:
         description: '请选择编译阶段'
         required: true
         type: choice
-        default: '第 1 次运行 (编到 55% 自动安全刹车并存缓存)'
+        default: '第 2 次运行 (全量冲刺 100% 打包出 ROM)'
         options:
           - '第 1 次运行 (编到 55% 自动安全刹车并存缓存)'
           - '第 2 次运行 (全量冲刺 100% 打包出 ROM)'
@@ -39,7 +39,7 @@ jobs:
           sudo rm -rf /usr/lib/llvm-*
           sudo apt-get clean
           sudo rm -rf /var/cache/apt/archives/*
-          # 创建 10GB Swap
+          # 10G Swap 保护内存，留出最大磁盘空间
           sudo fallocate -l 10G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1M count=10240
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
@@ -55,17 +55,20 @@ jobs:
           sudo curl https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
           sudo chmod a+rx /usr/local/bin/repo
 
+      # ==========================================
+      # 1. 恢复上一次第 1 阶段存好的 4.02GB 核心 Ccache
+      # ==========================================
       - name: Restore Ccache
         uses: actions/cache/restore@v4
         with:
-          path: ~/.cache/ccache
+          path: /home/runner/.cache/ccache
           key: ccache-${{ runner.os }}-lineage18-${{ steps.timestamp.outputs.ts }}
           restore-keys: |
             ccache-${{ runner.os }}-lineage18-
 
       - name: Initialize Repo & Manifests
         run: |
-          mkdir -p ~/lineage && cd ~/lineage
+          mkdir -p /home/runner/lineage && cd /home/runner/lineage
           repo init -u https://github.com/LineageOS/android.git -b lineage-18.1 --no-clone-bundle --git-lfs --depth=1 -g default,-darwin
           mkdir -p .repo/local_manifests
           cat << 'EOF' > .repo/local_manifests/roomservice.xml
@@ -89,7 +92,7 @@ jobs:
 
       - name: Apply USB VID Whitelist Patch
         run: |
-          cd ~/lineage
+          cd /home/runner/lineage
           python3 -c '
           import re
           path = "frameworks/base/services/usb/java/com/android/server/usb/UsbHostManager.java"
@@ -144,7 +147,7 @@ jobs:
           '
 
       # ==========================================
-      # 智能接力编译（加入总任务数过滤：必须 > 80,000 才算全量阶段）
+      # 2. 智能接力编译 + 动态空间回血引擎 + 打包前精准裁减
       # ==========================================
       - name: Clean .repo & Build ROM with Ccache
         id: build_rom
@@ -152,76 +155,145 @@ jobs:
         env:
           BUILD_STAGE: ${{ inputs.build_stage }}
         run: |
-          cd ~/lineage
+          cd /home/runner/lineage
           rm -rf .repo
           echo "=== 删掉 .repo 后的磁盘空间 ==="
           df -h
 
           export USE_CCACHE=1
           export CCACHE_EXEC=/usr/bin/ccache
-          export CCACHE_DIR=~/.cache/ccache
+          export CCACHE_DIR=/home/runner/.cache/ccache
           ccache -M 8G
           export NINJA_ARGS="-j4"
           export SOURCE_DATE_EPOCH=1666051200
           source build/envsetup.sh
           lunch lineage_star2qltechn-userdebug
 
+          # 🧹 强力空间回收后台守护进程：清理内核废料与超大 symbols
+          cat << 'PYEOF' > /tmp/disk_cleaner.py
+          import os, time, shutil
+
+          OUT_DIR = "/home/runner/lineage/out/target/product/star2qltechn"
+          KERNEL_OBJ = os.path.join(OUT_DIR, "obj/KERNEL_OBJ")
+          SYMBOLS_DIR = os.path.join(OUT_DIR, "symbols")
+          cleaned_kernel = False
+
+          while True:
+              time.sleep(20)
+              try:
+                  # 1. 发现内核镜像生成后，立即清理内核数万个中间 .o (回血 10GB+)
+                  if not cleaned_kernel and os.path.exists(KERNEL_OBJ):
+                      boot_img = os.path.join(OUT_DIR, "boot.img")
+                      kernel_bin = os.path.join(KERNEL_OBJ, "arch/arm64/boot/Image.gz-dtb")
+                      if os.path.exists(boot_img) or os.path.exists(kernel_bin):
+                          for root, dirs, files in os.walk(KERNEL_OBJ):
+                              for f in files:
+                                  if f.endswith(('.o', '.o.cmd', '.o.d', '.a')) and not f.startswith('Image'):
+                                      try: os.remove(os.path.join(root, f))
+                                      except: pass
+                          # 内核源码也一并删除释放 4GB
+                          shutil.rmtree("/home/runner/lineage/kernel", ignore_errors=True)
+                          cleaned_kernel = True
+
+                  # 2. 持续清空无用的超大 symbols 调试符号 (回血 8GB+)
+                  if os.path.exists(SYMBOLS_DIR):
+                      for item in os.listdir(SYMBOLS_DIR):
+                          item_path = os.path.join(SYMBOLS_DIR, item)
+                          try:
+                              if os.path.isdir(item_path): shutil.rmtree(item_path, ignore_errors=True)
+                              else: os.remove(item_path)
+                          except: pass
+              except: pass
+          PYEOF
+          python3 /tmp/disk_cleaner.py &
+          CLEANER_PID=$!
+
           echo "🚀 当前任务模式: $BUILD_STAGE"
 
-          # 启动编译并在 Python 中监控进度
-          mka bacon 2>&1 | python3 -c '
-          import sys, re, os, signal, subprocess
-
-          stage = os.environ.get("BUILD_STAGE", "")
-          is_first_stage = "第 1 次" in stage
-          target_pct = 55       # 刹车目标百分比
-          min_total_tasks = 80000  # 👈 核心防坑：总任务数必须大于8万（排除前置小阶段）
+          # 阶段一：第1次运行（55% 自动刹车）
+          if [[ "$BUILD_STAGE" == *"第 1 次"* ]]; then
+            mka bacon 2>&1 | python3 -c '
+          import sys, re, subprocess
+          target_pct = 55
+          min_total_tasks = 80000
           last_pct = -1
-
           for line in sys.stdin:
               m = re.search(r"\[\s*(\d+)%\s+(\d+)/(\d+)\]", line)
               if m:
-                  pct = int(m.group(1))
-                  current = int(m.group(2))
-                  total = int(m.group(3))
-
+                  pct, current, total = int(m.group(1)), int(m.group(2)), int(m.group(3))
                   if pct != last_pct:
-                      print(f"🚀 编译进度: {pct}% ({current}/{total})")
-                      sys.stdout.flush()
+                      print(f"🚀 编译进度: {pct}% ({current}/{total})", flush=True)
                       last_pct = pct
-
-                  # 只有当处于【真实全量大任务阶段(total >= 80000)】且【达到55%】时才刹车
-                  if is_first_stage and total >= min_total_tasks and pct >= target_pct:
-                      print(f"\n🎉 [第 1 次接力完成] 全量任务 ({current}/{total}) 已达 {pct}%！安全停止并保存 Ccache 缓存...")
-                      sys.stdout.flush()
+                  if total >= min_total_tasks and pct >= target_pct:
+                      print(f"\n🎉 [第 1 次接力完成] 全量任务已达 {pct}%！安全停止并保存 Ccache 缓存...", flush=True)
                       subprocess.run(["pkill", "-TERM", "-f", "ninja"], check=False)
                       subprocess.run(["pkill", "-TERM", "-f", "mka"], check=False)
                       sys.exit(0)
-
               elif "FAILED" in line or "error:" in line or "Completed" in line:
-                  print(line, end="")
-                  sys.stdout.flush()
-          ' || true
+                  print(line, end="", flush=True)
+            ' || true
 
+          # 阶段二：第2次运行（全量冲刺 + 打包前极限瘦身）
+          else
+            # 1. 编译全量目标文件
+            mka target-files-package 2>&1 | python3 -c '
+          import sys, re
+          last_pct = -1
+          for line in sys.stdin:
+              m = re.search(r"\[\s*(\d+)%\s+(\d+)/(\d+)\]", line)
+              if m:
+                  pct, current, total = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                  if pct != last_pct:
+                      print(f"🚀 编译进度: {pct}% ({current}/{total})", flush=True)
+                      last_pct = pct
+              elif "FAILED" in line or "error:" in line or "Completed" in line:
+                  print(line, end="", flush=True)
+            '
+
+            # 2. 打包前精准删除用完的巨型源码（秒级回血 15GB+）
+            echo "🧹 [空间绝杀] 正在精准清理已完成使命的庞大源码，为最后打包留出绝对安全空间..."
+            rm -rf /home/runner/lineage/kernel
+            rm -rf /home/runner/lineage/art
+            rm -rf /home/runner/lineage/external/chromium-webview
+            rm -rf /home/runner/lineage/external/skia
+            rm -rf /home/runner/lineage/frameworks/base/core/java
+            echo "=== 打包前磁盘可用空间 ==="
+            df -h
+
+            # 3. 生成最终 ROM 卡刷包
+            mka bacon
+          fi
+
+          kill -9 $CLEANER_PID 2>/dev/null || true
+
+      # ==========================================
+      # 3. 保存 Ccache 缓存（无论如何都会执行）
+      # ==========================================
       - name: Save Ccache (Always on Success, Failure, Timeout, or Cancel)
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: ~/.cache/ccache
+          path: /home/runner/.cache/ccache
           key: ccache-${{ runner.os }}-lineage18-${{ steps.timestamp.outputs.ts }}
 
       - name: Show Ccache Stats & Disk Info
         if: always()
         run: |
-          export CCACHE_DIR=~/.cache/ccache
+          export CCACHE_DIR=/home/runner/.cache/ccache
           echo "=== Ccache 缓存命中与占用统计 ==="
           ccache -s || true
           echo "=== 当前磁盘剩余空间 ==="
           df -h
 
-      - name: Upload ROM Zip File
+      # ==========================================
+      # 4. 上传最终产物（ROM 刷机包 + boot/recovery 镜像）
+      # ==========================================
+      - name: Upload ROM & Flashable Images
         if: success() && contains(inputs.build_stage, '第 2 次')
         uses: actions/upload-artifact@v4
         with:
-          name: LineageOS-18.1-star2qltechn-ROM
-          path: ~/lineage/out/target/product/star2qltechn/lineage-18.1-*.zip
+          name: LineageOS-18.1-star2qltechn-Package
+          path: |
+            /home/runner/lineage/out/target/product/star2qltechn/lineage-18.1-*.zip
+            /home/runner/lineage/out/target/product/star2qltechn/boot.img
+            /home/runner/lineage/out/target/product/star2qltechn/recovery.img
