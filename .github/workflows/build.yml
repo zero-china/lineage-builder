@@ -55,7 +55,7 @@ jobs:
           sudo chmod a+rx /usr/local/bin/repo
 
       # ==========================================
-      # 1. 恢复 Ccache
+      # 1. 恢复 Ccache（直接继承 4.96GB 的 75% 进度！）
       # ==========================================
       - name: Restore Ccache
         uses: actions/cache/restore@v4
@@ -109,6 +109,19 @@ jobs:
           </manifest>
           EOF
           repo sync -c --no-tags --no-clone-bundle --optimized-fetch -j8 --force-sync
+
+      # ==========================================
+      # 核心修复：补充 samsung_touch.h 等缺失头文件
+      # ==========================================
+      - name: Fix Samsung Hardware Missing Headers
+        run: |
+          cd /home/runner/lineage
+          echo "🔧 正在修复 samsung_touch.h 头文件依赖..."
+          mkdir -p hardware/samsung/hidl/touch
+          mkdir -p hardware/samsung/include
+          cp -rf device/samsung/sdm845-common/include/* hardware/samsung/hidl/touch/ 2>/dev/null || true
+          cp -rf device/samsung/sdm845-common/include/* hardware/samsung/include/ 2>/dev/null || true
+          echo "✅ 头文件补全完毕！"
 
       - name: Apply USB VID Whitelist Patch
         run: |
@@ -194,7 +207,7 @@ jobs:
           source build/envsetup.sh
           lunch lineage_star2qltechn-userdebug
 
-          # 🧹 安全空间守护进程：只清理中间临时 .o 和 symbols，绝不误删系统源码
+          # 🧹 安全空间守护进程：只清理中间临时 .o 和 symbols
           cat << 'PYEOF' > /tmp/disk_cleaner.py
           import os, time, shutil
 
@@ -206,7 +219,6 @@ jobs:
           while True:
               time.sleep(20)
               try:
-                  # 只清理 obj/KERNEL_OBJ 下由 make 生成的中间 .o 文件
                   if not cleaned_kernel and os.path.exists(KERNEL_OBJ):
                       boot_img = os.path.join(OUT_DIR, "boot.img")
                       kernel_bin = os.path.join(KERNEL_OBJ, "arch/arm64/boot/Image.gz-dtb")
@@ -217,7 +229,6 @@ jobs:
                                       try: os.remove(os.path.join(root, f))
                                       except: pass
                           cleaned_kernel = True
-                  # 清理 symbols 目录
                   if os.path.exists(SYMBOLS_DIR):
                       for item in os.listdir(SYMBOLS_DIR):
                           item_path = os.path.join(SYMBOLS_DIR, item)
@@ -232,7 +243,7 @@ jobs:
 
           echo "🚀 当前任务模式: $BUILD_STAGE"
 
-          # 阶段一：第1次运行（55% 自动刹车）
+          # 阶段一：第1次运行
           if [[ "$BUILD_STAGE" == *"第 1 次"* ]]; then
             mka bacon 2>&1 | python3 -c '
           import sys, re, subprocess
@@ -255,9 +266,8 @@ jobs:
                   print(line, end="", flush=True)
             ' || true
 
-          # 阶段二：第2次运行（全量冲刺）
+          # 阶段二：第2次运行（全速冲刺 100%）
           else
-            # 直接使用 bacon 构建，由后台守护进程安全释放空间
             mka bacon 2>&1 | python3 -c '
           import sys, re
           last_pct = -1
