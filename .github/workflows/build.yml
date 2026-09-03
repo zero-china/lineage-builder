@@ -20,7 +20,7 @@ jobs:
           sudo apt-get autoremove -y || true
           sudo apt-get clean || true
           
-          echo "=== 2. 创建 16GB 高性能 Swap (彻底解决 OOM) ==="
+          echo "=== 2. 创建 16GB 高性能 Swap (解决 OOM) ==="
           sudo swapoff -a || true
           sudo rm -f /swapfile || true
           sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
@@ -29,9 +29,9 @@ jobs:
           sudo swapon /swapfile
           free -h
 
-          echo "=== 3. 安装 AOSP 依赖工具链 ==="
+          echo "=== 3. 安装 AOSP 依赖工具链 (恢复之前验证正确的原始指令) ==="
           sudo apt-get update
-          sudo apt-get install -y bc bisect build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf lib32ncurses5-dev lib32z1-dev liblibc6-dev-i386 libncurses5 libncurses5-dev libreadline-dev libsqlite3-dev libssl-dev libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 python-is-python3 zstd
+          sudo apt-get install -y bc build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf lib32ncurses5-dev lib32z1-dev libc6-dev-i386 libncurses5 libncurses5-dev libreadline-dev libsqlite3-dev libssl-dev libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 python-is-python3 zstd || true
 
           echo "=== 4. 配置 Repo 工具 ==="
           mkdir -p ~/bin
@@ -39,7 +39,7 @@ jobs:
           chmod a+x ~/bin/repo
           echo "$HOME/bin" >> $GITHUB_PATH
 
-          echo "=== 5. 创建 Ccache 目录 (严格统一步骤路径) ==="
+          echo "=== 5. 创建 Ccache 目录 ==="
           mkdir -p /home/runner/.cache/ccache
 
       # ----------------------------------------------------
@@ -162,7 +162,7 @@ jobs:
           while True:
               time.sleep(30)
               try:
-                  # 1. 随产随清 symbols 调试符号 (不留隐患，大头优先干掉)
+                  # 1. 随产随清 symbols 调试符号 (不留隐患)
                   if os.path.exists(SYMBOLS_DIR):
                       for item in os.listdir(SYMBOLS_DIR):
                           p = os.path.join(SYMBOLS_DIR, item)
@@ -225,7 +225,7 @@ jobs:
           ccache -s
 
       # ----------------------------------------------------
-      # Ccache 保存步骤 (使用 if: always() 确保无论成功失败都保存)
+      # Ccache 保存步骤
       # ----------------------------------------------------
       - name: Save Ccache
         uses: actions/cache/save@v4
