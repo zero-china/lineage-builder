@@ -39,7 +39,6 @@ jobs:
           sudo rm -rf /usr/lib/llvm-*
           sudo apt-get clean
           sudo rm -rf /var/cache/apt/archives/*
-          # 10G Swap 保护内存，留出最大磁盘空间
           sudo fallocate -l 10G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1M count=10240
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
@@ -56,41 +55,22 @@ jobs:
           sudo chmod a+rx /usr/local/bin/repo
 
       # ==========================================
-      # 1. 恢复 Ccache（双路径兼容：同时注册 ~/.cache/ccache 与 /home/runner/.cache/ccache）
+      # 1. 恢复 Ccache（纯绝对路径，杜绝任何歧义）
       # ==========================================
-      - name: Restore Ccache (Dual-Path Compatible)
-        id: restore-cache
+      - name: Restore Ccache
         uses: actions/cache/restore@v4
         with:
-          path: |
-            ~/.cache/ccache
-            /home/runner/.cache/ccache
+          path: /home/runner/.cache/ccache
           key: ccache-${{ runner.os }}-lineage18-${{ steps.timestamp.outputs.ts }}
           restore-keys: |
             ccache-${{ runner.os }}-lineage18-
 
-      # ==========================================
-      # 2. 核心补丁：无论云端命中哪种路径，全部统一迁移归位到标准目录
-      # ==========================================
-      - name: Align and Verify Ccache Directory
+      - name: Verify Ccache Directory
         run: |
           mkdir -p /home/runner/.cache/ccache
-
-          # 1. 如果解压在工作区相对路径
-          if [ -d "$GITHUB_WORKSPACE/.cache/ccache" ]; then
-            echo "🔧 检测到工作区路径缓存，正在迁移合并..."
-            cp -rn $GITHUB_WORKSPACE/.cache/ccache/* /home/runner/.cache/ccache/ 2>/dev/null || true
-          fi
-
-          # 2. 如果解压在用户波浪号家目录
-          if [ -d "$HOME/.cache/ccache" ] && [ "$HOME" != "/home/runner" ]; then
-            echo "🔧 检测到家目录缓存，正在迁移合并..."
-            cp -rn $HOME/.cache/ccache/* /home/runner/.cache/ccache/ 2>/dev/null || true
-          fi
-
-          # 3. 校验最终 Ccache 状态
           export CCACHE_DIR=/home/runner/.cache/ccache
-          echo "=== 最终生效的 Ccache 状态 ==="
+          ccache -M 8G
+          echo "=== 校验恢复后的 Ccache 状态 ==="
           ccache -s
 
       - name: Initialize Repo & Manifests
@@ -216,7 +196,6 @@ jobs:
           with open(target_file, "r") as f:
               content = f.read()
 
-          # 补丁：针对 VID==0 && PID==0 的键盘设备，所有按键均将 deviceId 伪装为 -1 (VIRTUAL_KEYBOARD_ID)
           patch_logic = """
               // [CUSTOM PATCH] 针对 0x0000:0x0000 键盘设备，所有按键均重置为 Virtual 虚拟设备
               int32_t finalDeviceId = getDeviceId();
@@ -325,7 +304,7 @@ jobs:
                   print(line, end="", flush=True)
             ' || true
 
-          # 阶段二：第2次运行（全速冲刺 100%）
+          # 阶段二：第2次运行
           else
             mka bacon 2>&1 | python3 -c '
           import sys, re
@@ -345,15 +324,13 @@ jobs:
           kill -9 $CLEANER_PID 2>/dev/null || true
 
       # ==========================================
-      # 4. 保存 Ccache 缓存（双路径同时保存，确保绝对兼容）
+      # 4. 保存 Ccache 缓存（纯绝对路径）
       # ==========================================
       - name: Save Ccache (Always on Success, Failure, Timeout, or Cancel)
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: |
-            ~/.cache/ccache
-            /home/runner/.cache/ccache
+          path: /home/runner/.cache/ccache
           key: ccache-${{ runner.os }}-lineage18-${{ steps.timestamp.outputs.ts }}
 
       - name: Show Ccache Stats & Disk Info
