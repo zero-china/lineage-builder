@@ -24,7 +24,7 @@ jobs:
 
       - name: Deep Cleanup Disk Space & Setup 16G Swap
         run: |
-          sudo swapoff -a 2>/dev/null || true
+          sudo swapoff a 2>/dev/null || true
           sudo rm -f /swapfile 2>/dev/null || true
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
@@ -217,7 +217,7 @@ jobs:
           '
 
       # ==========================================
-      # 3. 智能接力编译 + 防竞争空间守护进程
+      # 3. 智能接力编译 + 真实 Soong 目标空间守护进程
       # ==========================================
       - name: Clean .repo & Build ROM with Ccache
         id: build_rom
@@ -246,13 +246,18 @@ jobs:
           lunch lineage_star2qltechn-userdebug
           export SOONG_MAX_LINK_JOBS=1
 
-          # 🧹 高位防竞争守护进程：35GB 水位预警 + mtime > 60s 时间锁
+          # 🔧 在编译前最后一秒，二次防线：强制写入 samsung_touch.h 确保不被 wipe 擦除
+          mkdir -p hardware/samsung/hidl/touch hardware/samsung/include
+          cp -rf device/samsung/sdm845-common/include/* hardware/samsung/hidl/touch/ 2>/dev/null || true
+          cp -rf device/samsung/sdm845-common/include/* hardware/samsung/include/ 2>/dev/null || true
+
+          # 🧹 修正版的守护进程：精准锁定 out/soong/.intermediates Soong 真正的垃圾大本营
           cat << 'PYEOF' > /tmp/disk_cleaner.py
           import os, time, shutil
 
-          OUT_DIR = "/home/runner/lineage/out/target/product/star2qltechn"
-          KERNEL_OBJ = os.path.join(OUT_DIR, "obj/KERNEL_OBJ")
-          SYMBOLS_DIR = os.path.join(OUT_DIR, "symbols")
+          OUT_DIR = "/home/runner/lineage/out"
+          SOONG_INTERMEDIATES = "/home/runner/lineage/out/soong/.intermediates"
+          SYMBOLS_DIR = "/home/runner/lineage/out/target/product/star2qltechn/symbols"
 
           while True:
               time.sleep(30)
@@ -261,39 +266,25 @@ jobs:
                   avail_gb = (st.f_bavail * st.f_frsize) / (1024 * 1024 * 1024)
                   now = time.time()
 
-                  # 随产随清调试符号
+                  # 1. 强制随产随清调试符号
                   if os.path.exists(SYMBOLS_DIR):
-                      for item in os.listdir(SYMBOLS_DIR):
-                          p = os.path.join(SYMBOLS_DIR, item)
-                          try:
-                              if os.path.isdir(p): shutil.rmtree(p, ignore_errors=True)
-                              else: os.remove(p)
-                          except: pass
+                      try: shutil.rmtree(SYMBOLS_DIR, ignore_errors=True)
+                      except: pass
 
-                  # 水位预警：低于 35GB 时触发防竞争清理
+                  # 2. 水位预警：低于 35GB 触发真正的 Soong 垃圾大扫除
                   if avail_gb < 35.0:
-                      print(f"\n[DiskCleaner] ⚠️ 磁盘剩余空间仅剩 {avail_gb:.1f}GB，触发主动空间回收...", flush=True)
+                      print(f"\n[DiskCleaner] ⚠️ 磁盘剩余空间仅剩 {avail_gb:.1f}GB，触发 Soong 大本营深度回收...", flush=True)
 
-                      if os.path.exists(OUT_DIR):
-                          for root, dirs, files in os.walk(OUT_DIR):
-                              for f in files:
-                                  if f.endswith(('.o.cmd', '.d', '.cmd')):
-                                      fp = os.path.join(root, f)
-                                      try:
-                                          if now - os.path.getmtime(fp) > 60:
-                                              os.remove(fp)
-                                      except: pass
-
-                      vmlinux_path = os.path.join(KERNEL_OBJ, "vmlinux")
-                      if os.path.exists(vmlinux_path):
-                          for root, dirs, files in os.walk(KERNEL_OBJ):
-                              for f in files:
-                                  if f.endswith('.o') and not f.startswith('Image'):
-                                      fp = os.path.join(root, f)
-                                      try:
-                                          if now - os.path.getmtime(fp) > 60:
-                                              os.remove(fp)
-                                      except: pass
+                      # 深度清理 soong/.intermediates 下所有修改时间超过 60 秒的 .d / .o.cmd 描述文件
+                      target_scan_dir = SOONG_INTERMEDIATES if os.path.exists(SOONG_INTERMEDIATES) else OUT_DIR
+                      for root, dirs, files in os.walk(target_scan_dir):
+                          for f in files:
+                              if f.endswith(('.o.cmd', '.d', '.cmd')):
+                                  fp = os.path.join(root, f)
+                                  try:
+                                      if now - os.path.getmtime(fp) > 60:
+                                          os.remove(fp)
+                                  except: pass
 
                       print("[DiskCleaner] ✅ 空间回收完成！", flush=True)
               except: pass
